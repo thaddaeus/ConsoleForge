@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ClaudeConnect build script
-# Creates a proper .app bundle from the SPM project
+# Creates a signed, notarized .app bundle and DMG from the SPM project
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -11,6 +11,10 @@ APP_NAME="ClaudeConnect"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 VERSION="${1:-0.1.0}"
 BUILD_NUMBER="$(date +%Y%m%d%H%M)"
+
+SIGN_IDENTITY="Developer ID Application: Thaddaeus Johnson (F49T92KK73)"
+NOTARY_PROFILE="ClaudeConnect-Notary"
+ENTITLEMENTS="$PROJECT_DIR/ClaudeConnect.entitlements"
 
 echo "Building $APP_NAME v$VERSION (build $BUILD_NUMBER)..."
 
@@ -69,12 +73,25 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <false/>
     <key>NSSupportsSuddenTermination</key>
     <false/>
+    <key>LSEnvironment</key>
+    <dict>
+        <key>OBJC_DISABLE_INITIALIZE_FORK_SAFETY</key>
+        <string>YES</string>
+    </dict>
 </dict>
 </plist>
 PLIST
 
-# Ad-hoc code sign (required for modern macOS)
-codesign --force --deep --sign - "$APP_BUNDLE" 2>/dev/null || echo "Warning: Code signing failed (app will still work locally)"
+# Code sign with Developer ID
+echo ""
+echo "Signing with Developer ID..."
+codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
+echo "Signed."
+
+# Verify signature
+codesign --verify --deep --strict "$APP_BUNDLE"
+echo "Signature verified."
 
 echo ""
 echo "✅ Built: $APP_BUNDLE"
@@ -107,5 +124,22 @@ hdiutil create -volname "$APP_NAME v$VERSION" \
 
 rm -rf "$DMG_TEMP"
 
+# Sign the DMG
+codesign --force --sign "$SIGN_IDENTITY" "$DMG_PATH"
+echo "DMG signed."
+
+# Notarize
+echo ""
+echo "Submitting for notarization (this may take a few minutes)..."
+xcrun notarytool submit "$DMG_PATH" \
+    --keychain-profile "$NOTARY_PROFILE" \
+    --wait 2>&1
+
+# Staple the notarization ticket
+echo "Stapling notarization ticket..."
+xcrun stapler staple "$DMG_PATH"
+
+echo ""
 echo "📦 Distribution DMG: $DMG_PATH"
-echo "   Upload this to GitHub Releases"
+echo "   Signed, notarized, and ready for distribution."
+echo "   Upload this to GitHub Releases."

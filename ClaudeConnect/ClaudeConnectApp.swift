@@ -6,6 +6,8 @@ import AppKit
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        // Required for forkpty() to work with hardened runtime (notarized builds)
+        setenv("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES", 1)
         // Eagerly resolve shell environment before SwiftUI creates any views
         _ = ShellEnvironment.shared
     }

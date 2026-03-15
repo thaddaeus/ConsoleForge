@@ -6,8 +6,8 @@ struct SwiftTermView: NSViewRepresentable {
     let isActive: Bool
     var onProcessTerminated: ((Int32?) -> Void)?
 
-    func makeNSView(context: Context) -> LocalProcessTerminalView {
-        let terminalView = LocalProcessTerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
+    func makeNSView(context: Context) -> TerminalView {
+        let terminalView = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
 
         // Configure appearance - match Terminal.app default (Menlo 11pt)
         let fontSize: CGFloat = 11
@@ -18,22 +18,47 @@ struct SwiftTermView: NSViewRepresentable {
         terminalView.optionAsMetaKey = true
 
         // Set the delegate
-        terminalView.processDelegate = context.coordinator
+        terminalView.terminalDelegate = context.coordinator
 
-        // Start the Claude process
+        // Start the Claude process via posix_spawn (no fork)
         let params = ClaudeProcessBuilder.build(from: configuration)
-        terminalView.startProcess(
-            executable: params.executable,
-            args: params.args,
-            environment: params.environment,
-            execName: nil,
-            currentDirectory: params.workingDirectory
-        )
+        do {
+            let process = try PtyProcess(
+                executable: params.executable,
+                args: params.args,
+                environment: params.environment,
+                workingDirectory: params.workingDirectory
+            )
+
+            // Wire PTY output to terminal display
+            process.onData = { [weak terminalView] data in
+                DispatchQueue.main.async {
+                    let bytes = ArraySlice(data)
+                    terminalView?.feed(byteArray: bytes)
+                }
+            }
+
+            let onTerminated = onProcessTerminated
+            process.onExit = { exitCode in
+                onTerminated?(exitCode)
+            }
+
+            // Set initial window size
+            let terminal = terminalView.getTerminal()
+            process.setWindowSize(cols: terminal.cols, rows: terminal.rows)
+
+            context.coordinator.process = process
+        } catch {
+            print("Failed to start process: \(error)")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                self.onProcessTerminated?(-1)
+            }
+        }
 
         return terminalView
     }
 
-    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+    func updateNSView(_ nsView: TerminalView, context: Context) {
         // When this terminal becomes the active tab, give it focus
         if isActive {
             DispatchQueue.main.async {
@@ -46,18 +71,19 @@ struct SwiftTermView: NSViewRepresentable {
         Coordinator(onTerminated: onProcessTerminated)
     }
 
-    class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
+    class Coordinator: NSObject, TerminalViewDelegate {
         let onTerminated: ((Int32?) -> Void)?
+        var process: PtyProcess?
 
         init(onTerminated: ((Int32?) -> Void)?) {
             self.onTerminated = onTerminated
         }
 
-        func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {
-            // Terminal handles this internally
+        func sizeChanged(source: TerminalView, newCols: Int, newRows: Int) {
+            process?.setWindowSize(cols: newCols, rows: newRows)
         }
 
-        func setTerminalTitle(source: LocalProcessTerminalView, title: String) {
+        func setTerminalTitle(source: TerminalView, title: String) {
             // Could update tab title
         }
 
@@ -65,10 +91,34 @@ struct SwiftTermView: NSViewRepresentable {
             // Optional: track current directory
         }
 
-        func processTerminated(source: TerminalView, exitCode: Int32?) {
-            DispatchQueue.main.async { [weak self] in
-                self?.onTerminated?(exitCode)
+        func send(source: TerminalView, data: ArraySlice<UInt8>) {
+            // User typed something — send to PTY
+            process?.write(Data(data))
+        }
+
+        func scrolled(source: TerminalView, position: Double) {
+            // Scroll position changed
+        }
+
+        func clipboardCopy(source: TerminalView, content: Data) {
+            if let str = String(data: content, encoding: .utf8) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(str, forType: .string)
             }
+        }
+
+        func rangeChanged(source: TerminalView, startY: Int, endY: Int) {
+            // Selection range changed
+        }
+
+        func requestOpenLink(source: TerminalView, link: String, params: [String : String]) {
+            if let url = URL(string: link) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+
+        func bell(source: TerminalView) {
+            NSSound.beep()
         }
     }
 }
