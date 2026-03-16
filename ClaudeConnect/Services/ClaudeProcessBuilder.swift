@@ -7,14 +7,15 @@ struct ProcessParams {
     let workingDirectory: String
 }
 
-/// Resolves the user's login shell once at startup.
-/// Instead of forking to read `env` (which crashes under hardened runtime),
-/// we spawn the login shell via PTY and let it resolve PATH naturally.
+/// Resolves shell and tool paths at startup without forking.
 class ShellEnvironment {
     static let shared = ShellEnvironment()
 
     /// The user's login shell (e.g. /bin/zsh)
     let shell: String
+
+    /// Absolute path to the claude binary, or nil if not found
+    let claudePath: String?
 
     private init() {
         // Read login shell from passwd entry, fallback to /bin/zsh
@@ -24,6 +25,49 @@ class ShellEnvironment {
         } else {
             self.shell = "/bin/zsh"
         }
+
+        // Search common directories for the claude binary (no fork needed)
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let searchDirs = [
+            "\(home)/.local/bin",
+            "\(home)/.claude/local",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            "/usr/bin",
+            "\(home)/.nvm/versions/node/*/bin",  // nvm
+            "\(home)/.volta/bin",                  // volta
+            "\(home)/.npm-global/bin",
+        ]
+
+        var found: String? = nil
+        let fm = FileManager.default
+        for dir in searchDirs {
+            if dir.contains("*") {
+                // Glob-style: expand with directory enumeration
+                let parent = (dir as NSString).deletingLastPathComponent
+                let pattern = (dir as NSString).lastPathComponent
+                if let contents = try? fm.contentsOfDirectory(atPath: (parent as NSString).deletingLastPathComponent) {
+                    for entry in contents {
+                        let full = ((parent as NSString).deletingLastPathComponent as NSString)
+                            .appendingPathComponent(entry)
+                        let candidate = (full as NSString).appendingPathComponent(pattern)
+                            .appending("/claude")
+                        if fm.isExecutableFile(atPath: candidate) {
+                            found = candidate
+                            break
+                        }
+                    }
+                }
+            } else {
+                let candidate = (dir as NSString).appendingPathComponent("claude")
+                if fm.isExecutableFile(atPath: candidate) {
+                    found = candidate
+                    break
+                }
+            }
+            if found != nil { break }
+        }
+        self.claudePath = found
     }
 }
 
@@ -33,7 +77,8 @@ struct ClaudeProcessBuilder {
         let env = ShellEnvironment.shared
 
         // Build the claude command string with all arguments
-        var parts: [String] = ["claude"]
+        // Use absolute path if resolved, otherwise fall back to bare name for shell PATH lookup
+        var parts: [String] = [env.claudePath ?? "claude"]
 
         if let model = config.model, !model.isEmpty {
             parts.append(contentsOf: ["--model", shellQuote(model)])
