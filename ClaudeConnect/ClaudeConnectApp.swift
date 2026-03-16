@@ -94,6 +94,10 @@ struct ClaudeConnectApp: App {
             }
         }
 
+        Settings {
+            SettingsView()
+        }
+
         Window("Edit Session", id: "session-editor") {
             SessionEditorWindow()
                 .environment(store)

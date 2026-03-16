@@ -77,8 +77,15 @@ struct ClaudeProcessBuilder {
         let env = ShellEnvironment.shared
 
         // Build the claude command string with all arguments
-        // Use absolute path if resolved, otherwise fall back to bare name for shell PATH lookup
-        var parts: [String] = [env.claudePath ?? "claude"]
+        // Priority: user setting > auto-detected > bare name for shell PATH lookup
+        let userPath = UserDefaults.standard.string(forKey: "claudeBinaryPath") ?? ""
+        let claudeBinary: String
+        if !userPath.isEmpty, FileManager.default.isExecutableFile(atPath: userPath) {
+            claudeBinary = userPath
+        } else {
+            claudeBinary = env.claudePath ?? "claude"
+        }
+        var parts: [String] = [claudeBinary]
 
         if let model = config.model, !model.isEmpty {
             parts.append(contentsOf: ["--model", shellQuote(model)])
