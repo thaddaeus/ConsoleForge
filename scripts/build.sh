@@ -60,6 +60,7 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$SCRIPT_DIR/consoleforge-tab" "$APP_BUNDLE/Contents/Resources/consoleforge-tab"
+cp "$PROJECT_DIR/ConsoleForge/Assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
