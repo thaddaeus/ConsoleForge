@@ -26,6 +26,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 struct ConsoleForgeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var store = SessionStore()
+    @State private var activityTracker = TabActivityTracker()
     @State private var commandWatcher = CommandWatcher()
     @State private var updateChecker = UpdateChecker()
     @State private var showFDAPrompt = false
@@ -34,6 +35,7 @@ struct ConsoleForgeApp: App {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .environment(activityTracker)
                 .environment(updateChecker)
                 .task {
                     commandWatcher.onCommand = { command in
@@ -157,6 +159,7 @@ struct ConsoleForgeApp: App {
     private func handleCloseTab(_ command: TabCommand) {
         // Close by tab ID (used by --close-self)
         if let tabIDStr = command.tabID, let tabID = UUID(uuidString: tabIDStr) {
+            activityTracker.removeTab(tabID: tabID)
             store.closeTab(sessionID: tabID)
             return
         }
@@ -165,6 +168,7 @@ struct ConsoleForgeApp: App {
             if let session = store.sessions.first(where: {
                 $0.name == name && store.openTabIDs.contains($0.id)
             }) {
+                activityTracker.removeTab(tabID: session.id)
                 store.closeTab(sessionID: session.id)
             }
         }

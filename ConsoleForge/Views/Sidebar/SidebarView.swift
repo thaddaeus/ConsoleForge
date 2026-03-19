@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(SessionStore.self) private var store
+    @Environment(TabActivityTracker.self) private var activityTracker
     @Environment(\.openWindow) private var openWindow
     @State private var showNewFolder = false
     @State private var newFolderName = ""
@@ -126,7 +127,7 @@ struct SidebarView: View {
 
             if store.openTabIDs.contains(session.id) {
                 Circle()
-                    .fill(.green)
+                    .fill(activityTracker.activity(for: session.id).indicatorColor)
                     .frame(width: 6, height: 6)
             }
         }

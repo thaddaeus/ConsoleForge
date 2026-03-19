@@ -5,6 +5,8 @@ struct SwiftTermView: NSViewRepresentable {
     let configuration: SessionConfiguration
     let isActive: Bool
     var onProcessTerminated: ((Int32?) -> Void)?
+    var onOutputReceived: (() -> Void)?
+    var onBellReceived: (() -> Void)?
 
     func makeNSView(context: Context) -> TerminalView {
         let terminalView = TerminalView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -31,10 +33,18 @@ struct SwiftTermView: NSViewRepresentable {
             )
 
             // Wire PTY output to terminal display
+            let onOutput = onOutputReceived
+            let onBell = onBellReceived
             process.onData = { [weak terminalView] data in
+                // Detect bell character (0x07) — Claude sends this on permission prompts
+                let hasBell = data.contains(0x07)
                 DispatchQueue.main.async {
                     let bytes = ArraySlice(data)
                     terminalView?.feed(byteArray: bytes)
+                    onOutput?()
+                    if hasBell {
+                        onBell?()
+                    }
                 }
             }
 
@@ -86,6 +96,7 @@ struct SwiftTermView: NSViewRepresentable {
 
     class Coordinator: NSObject, TerminalViewDelegate {
         let onTerminated: ((Int32?) -> Void)?
+        var onBell: (() -> Void)?
         var process: PtyProcess?
 
         init(onTerminated: ((Int32?) -> Void)?) {
@@ -132,6 +143,7 @@ struct SwiftTermView: NSViewRepresentable {
 
         func bell(source: TerminalView) {
             NSSound.beep()
+            onBell?()
         }
     }
 }

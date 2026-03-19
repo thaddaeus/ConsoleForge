@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TerminalTabBar: View {
     @Environment(SessionStore.self) private var store
+    @Environment(TabActivityTracker.self) private var activityTracker
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -22,9 +23,10 @@ struct TerminalTabBar: View {
     }
 
     private func tabButton(session: SessionConfiguration, isActive: Bool) -> some View {
-        HStack(spacing: 6) {
+        let activity = activityTracker.activity(for: session.id)
+        return HStack(spacing: 6) {
             Circle()
-                .fill(session.tabColor)
+                .fill(isActive ? session.tabColor : activity.indicatorColor)
                 .frame(width: 8, height: 8)
 
             Image(systemName: session.tabIconName)

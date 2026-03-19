@@ -2,6 +2,7 @@ import SwiftUI
 
 struct TerminalContainerView: View {
     @Environment(SessionStore.self) private var store
+    @Environment(TabActivityTracker.self) private var activityTracker
     @State private var tabStates: [UUID: SessionState] = [:]
 
     var body: some View {
@@ -26,6 +27,11 @@ struct TerminalContainerView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onChange(of: store.activeTabID) { _, newID in
+                if let tabID = newID {
+                    activityTracker.didFocusTab(tabID: tabID)
+                }
+            }
         }
     }
 
@@ -49,6 +55,19 @@ struct TerminalContainerView: View {
                 isActive: store.activeTabID == sessionID,
                 onProcessTerminated: { exitCode in
                     tabStates[sessionID] = .terminated(exitCode)
+                    activityTracker.didTerminate(tabID: sessionID)
+                },
+                onOutputReceived: {
+                    activityTracker.didReceiveOutput(
+                        tabID: sessionID,
+                        isActive: store.activeTabID == sessionID
+                    )
+                },
+                onBellReceived: {
+                    activityTracker.didReceiveBell(
+                        tabID: sessionID,
+                        isActive: store.activeTabID == sessionID
+                    )
                 }
             )
             .onAppear {
