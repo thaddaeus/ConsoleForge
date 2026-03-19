@@ -97,6 +97,21 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
         <key>OBJC_DISABLE_INITIALIZE_FORK_SAFETY</key>
         <string>YES</string>
     </dict>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.thaddaeus.consoleforge.session</string>
+            <key>UTTypeDescription</key>
+            <string>ConsoleForge Session</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict/>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST

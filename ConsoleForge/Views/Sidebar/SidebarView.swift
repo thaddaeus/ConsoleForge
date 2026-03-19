@@ -1,4 +1,21 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+// MARK: - Drag & Drop Transfer
+
+extension UTType {
+    static let consoleForgeSession = UTType(exportedAs: "com.thaddaeus.consoleforge.session")
+}
+
+struct SessionTransfer: Codable, Transferable {
+    let sessionID: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .consoleForgeSession)
+    }
+}
+
+// MARK: - Sidebar
 
 struct SidebarView: View {
     @Environment(SessionStore.self) private var store
@@ -8,6 +25,8 @@ struct SidebarView: View {
     @State private var newFolderName = ""
     @State private var renamingFolderID: UUID?
     @State private var renameFolderName = ""
+    @State private var hoveredSessionID: UUID?
+    @State private var dropTargetFolderID: UUID?
 
     var body: some View {
         List {
@@ -78,6 +97,7 @@ struct SidebarView: View {
             let folderSessions = store.sessionsInFolder(folder.id)
             ForEach(folderSessions) { session in
                 sessionRow(session)
+                    .draggable(SessionTransfer(sessionID: session.id.uuidString))
             }
         } label: {
             HStack {
@@ -93,6 +113,19 @@ struct SidebarView: View {
                     .padding(.vertical, 2)
                     .background(.quaternary)
                     .clipShape(Capsule())
+            }
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(dropTargetFolderID == folder.id ? Color.accentColor.opacity(0.2) : .clear)
+            )
+            .dropDestination(for: SessionTransfer.self) { items, _ in
+                guard let item = items.first,
+                      let sessionID = UUID(uuidString: item.sessionID) else { return false }
+                store.moveSession(id: sessionID, toFolder: folder.id)
+                return true
+            } isTargeted: { targeted in
+                dropTargetFolderID = targeted ? folder.id : (dropTargetFolderID == folder.id ? nil : dropTargetFolderID)
             }
             .contextMenu {
                 Button("Rename...") {
@@ -110,7 +143,8 @@ struct SidebarView: View {
     }
 
     private func sessionRow(_ session: SessionConfiguration) -> some View {
-        HStack(spacing: 8) {
+        let isHovered = hoveredSessionID == session.id
+        return HStack(spacing: 8) {
             Circle()
                 .fill(session.tabColor)
                 .frame(width: 8, height: 8)
@@ -130,6 +164,15 @@ struct SidebarView: View {
                     .fill(activityTracker.activity(for: session.id).indicatorColor)
                     .frame(width: 6, height: 6)
             }
+        }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(isHovered ? Color.primary.opacity(0.06) : .clear)
+        )
+        .onHover { hovering in
+            hoveredSessionID = hovering ? session.id : nil
         }
         .contentShape(Rectangle())
         .onTapGesture(count: 2) {
@@ -151,9 +194,7 @@ struct SidebarView: View {
                 ForEach(store.folders) { folder in
                     if folder.id != session.folderID {
                         Button(folder.name) {
-                            var updated = session
-                            updated.folderID = folder.id
-                            store.updateSession(updated)
+                            store.moveSession(id: session.id, toFolder: folder.id)
                         }
                     }
                 }

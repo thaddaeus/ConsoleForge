@@ -10,6 +10,7 @@ struct SessionEditorWindow: View {
                let session = store.session(for: sessionID) {
                 SessionEditorView(
                     session: session,
+                    folders: store.folders,
                     onSave: { updated in
                         store.updateSession(updated)
                         store.editingSessionID = nil

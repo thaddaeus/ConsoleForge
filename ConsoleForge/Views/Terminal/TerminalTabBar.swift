@@ -3,6 +3,7 @@ import SwiftUI
 struct TerminalTabBar: View {
     @Environment(SessionStore.self) private var store
     @Environment(TabActivityTracker.self) private var activityTracker
+    @State private var hoveredTabID: UUID?
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -24,6 +25,7 @@ struct TerminalTabBar: View {
 
     private func tabButton(session: SessionConfiguration, isActive: Bool) -> some View {
         let activity = activityTracker.activity(for: session.id)
+        let isHovered = hoveredTabID == session.id
         return HStack(spacing: 6) {
             Circle()
                 .fill(isActive ? session.tabColor : activity.indicatorColor)
@@ -47,11 +49,15 @@ struct TerminalTabBar: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .opacity(isActive ? 1 : 0)
+            .opacity(isActive || isHovered ? 1 : 0)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(isActive ? Color(nsColor: .selectedControlColor).opacity(0.3) : .clear)
+        .background(
+            isActive
+                ? Color(nsColor: .selectedControlColor).opacity(0.3)
+                : (isHovered ? Color.primary.opacity(0.06) : .clear)
+        )
         .overlay(alignment: .bottom) {
             if isActive {
                 Rectangle()
@@ -61,6 +67,9 @@ struct TerminalTabBar: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
         .contentShape(Rectangle())
+        .onHover { hovering in
+            hoveredTabID = hovering ? session.id : nil
+        }
         .onTapGesture {
             store.switchToTab(sessionID: session.id)
         }

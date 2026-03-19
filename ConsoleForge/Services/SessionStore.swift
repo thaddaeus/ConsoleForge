@@ -157,6 +157,13 @@ class SessionStore {
         }
     }
 
+    func moveSession(id: UUID, toFolder folderID: UUID) {
+        if let idx = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[idx].folderID = folderID
+            save()
+        }
+    }
+
     // MARK: - Tab Management
 
     func openTab(sessionID: UUID) {

@@ -27,6 +27,7 @@ struct HelpTip: View {
 
 struct SessionEditorView: View {
     @State var session: SessionConfiguration
+    var folders: [SessionFolder] = []
 
     var onSave: (SessionConfiguration) -> Void
     var onSaveAndLaunch: (SessionConfiguration) -> Void
@@ -74,6 +75,25 @@ struct SessionEditorView: View {
                                 HStack(spacing: 4) {
                                     Text("Name")
                                     HelpTip(text: "A display name for this session. Shown in the sidebar and tab bar.")
+                                }
+                            }
+
+                            if !folders.isEmpty {
+                                LabeledContent {
+                                    Picker("", selection: Binding(
+                                        get: { session.folderID ?? folders.first?.id ?? UUID() },
+                                        set: { session.folderID = $0 }
+                                    )) {
+                                        ForEach(folders) { folder in
+                                            Text(folder.name).tag(folder.id)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text("Folder")
+                                        HelpTip(text: "Which sidebar folder this session belongs to.")
+                                    }
                                 }
                             }
 
