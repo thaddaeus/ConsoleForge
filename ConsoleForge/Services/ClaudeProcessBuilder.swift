@@ -73,7 +73,7 @@ class ShellEnvironment {
 
 struct ClaudeProcessBuilder {
 
-    static func build(from config: SessionConfiguration) -> ProcessParams {
+    static func build(from config: SessionConfiguration, tabID: UUID? = nil) -> ProcessParams {
         let env = ShellEnvironment.shared
 
         // Build the claude command string with all arguments
@@ -148,13 +148,22 @@ struct ClaudeProcessBuilder {
         let workDir = (config.workingDirectory as NSString).expandingTildeInPath
         let command = parts.joined(separator: " ")
 
+        // Inject ConsoleForge env vars so tabs can identify themselves
+        var envVars: [String]? = nil
+        if let tabID = tabID {
+            var inherited = ProcessInfo.processInfo.environment.map { "\($0.key)=\($0.value)" }
+            inherited.append("CONSOLEFORGE_TAB_ID=\(tabID.uuidString)")
+            inherited.append("CONSOLEFORGE_SESSION_NAME=\(config.name)")
+            envVars = inherited
+        }
+
         // Spawn the user's login shell which will resolve PATH and run claude
         // Using -l for login shell (loads .zprofile for PATH), -c for command
         // Avoid -i (interactive) which loads .zshrc plugins/completions and slows startup
         return ProcessParams(
             executable: env.shell,
             args: ["-l", "-c", command],
-            environment: nil,  // Let the login shell set up its own environment
+            environment: envVars,
             workingDirectory: workDir
         )
     }
@@ -179,6 +188,8 @@ struct ClaudeProcessBuilder {
       --flag FLAG              Additional CLI flag (can be repeated)
       --color HEX              Tab color (e.g. "#FF2D55")
       --continue               Continue previous session
+      --close-self             Close this tab (when your work is done)
+      --close --name NAME      Close another tab by name
 
     Example: consoleforge-tab --name "Feature Work" --cwd /path/to/worktree --prompt "Implement the feature"
     """

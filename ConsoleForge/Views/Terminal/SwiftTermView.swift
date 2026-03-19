@@ -21,7 +21,7 @@ struct SwiftTermView: NSViewRepresentable {
         terminalView.terminalDelegate = context.coordinator
 
         // Start the Claude process via posix_spawn (no fork)
-        let params = ClaudeProcessBuilder.build(from: configuration)
+        let params = ClaudeProcessBuilder.build(from: configuration, tabID: configuration.id)
         do {
             let process = try PtyProcess(
                 executable: params.executable,

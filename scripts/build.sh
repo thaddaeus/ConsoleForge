@@ -1,24 +1,48 @@
 #!/bin/bash
 set -euo pipefail
 
-# ConsoleForge build script
-# Creates a signed, notarized .app bundle and DMG from the SPM project
+# ConsoleForge release script
+# Builds, signs, notarizes, and optionally publishes a DMG to GitHub Releases.
+#
+# Usage:
+#   ./scripts/build.sh <version>                  # build + sign + notarize
+#   ./scripts/build.sh <version> --release         # also create GitHub release
+#   ./scripts/build.sh <version> --release --notes "description"
+#
+# Example:
+#   ./scripts/build.sh 0.5.0 --release --notes "Fix tab close crash"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$PROJECT_DIR/build"
 APP_NAME="ConsoleForge"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
-VERSION="${1:-0.1.0}"
-BUILD_NUMBER="$(date +%Y%m%d%H%M)"
-
-SIGN_IDENTITY="${DEV_ID_APPLICATION:?Set DEV_ID_APPLICATION env var (e.g. 'Developer ID Application: Your Name (TEAMID)')}"
-NOTARY_PROFILE="${NOTARY_PROFILE_NAME:?Set NOTARY_PROFILE_NAME env var (e.g. 'MyApp-Notary')}"
 ENTITLEMENTS="$PROJECT_DIR/ConsoleForge.entitlements"
 
-echo "Building $APP_NAME v$VERSION (build $BUILD_NUMBER)..."
+# Signing & notarization credentials — set these env vars or export them in your shell profile
+SIGN_IDENTITY="${DEV_ID_APPLICATION:?Set DEV_ID_APPLICATION env var (e.g. 'Developer ID Application: Your Name (TEAMID)')}"
+NOTARY_PROFILE="${NOTARY_PROFILE_NAME:-ConsoleForge Notary}"
 
-# Build release binary
+# Parse arguments
+VERSION="${1:?Usage: build.sh <version> [--release] [--notes \"...\"]}"
+shift
+DO_RELEASE=false
+RELEASE_NOTES=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --release) DO_RELEASE=true; shift ;;
+        --notes) RELEASE_NOTES="$2"; shift 2 ;;
+        *) echo "Unknown option: $1"; exit 1 ;;
+    esac
+done
+
+BUILD_NUMBER="$(date +%Y%m%d%H%M)"
+DMG_PATH="$BUILD_DIR/$APP_NAME-v$VERSION.dmg"
+
+echo "=== Building $APP_NAME v$VERSION (build $BUILD_NUMBER) ==="
+echo ""
+
+# ── Step 1: Build release binary ──
 cd "$PROJECT_DIR"
 swift build -c release 2>&1
 
@@ -27,21 +51,16 @@ if [ ! -f "$BINARY" ]; then
     echo "Error: Binary not found at $BINARY"
     exit 1
 fi
+echo "Binary: $BINARY"
 
-echo "Binary built: $BINARY"
-
-# Create .app bundle structure
+# ── Step 2: Create .app bundle ──
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy binary
 cp "$BINARY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-# Copy CLI tool into Resources for easy installation
 cp "$SCRIPT_DIR/consoleforge-tab" "$APP_BUNDLE/Contents/Resources/consoleforge-tab"
 
-# Create Info.plist
 cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -82,41 +101,40 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Code sign with Developer ID
+# ── Step 3: Code sign (hardened runtime + timestamp + entitlements) ──
 echo ""
 echo "Signing with Developer ID..."
-codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-codesign --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP_BUNDLE"
-echo "Signed."
+codesign --deep --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" \
+    --sign "$SIGN_IDENTITY" \
+    "$APP_BUNDLE"
 
-# Verify signature
+# Verify
 codesign --verify --deep --strict "$APP_BUNDLE"
 echo "Signature verified."
 
-echo ""
-echo "Built: $APP_BUNDLE"
-echo "   Version: $VERSION (build $BUILD_NUMBER)"
-echo ""
-echo "To install:"
-echo "  cp -R \"$APP_BUNDLE\" /Applications/"
-echo ""
-echo "To install CLI tool:"
-echo "  mkdir -p ~/.local/bin"
-echo "  cp \"$APP_BUNDLE/Contents/Resources/consoleforge-tab\" ~/.local/bin/"
-echo "  chmod +x ~/.local/bin/consoleforge-tab"
-echo ""
+# Confirm hardened runtime + timestamp
+SIGN_INFO=$(codesign -dvv "$APP_BUNDLE" 2>&1)
+if ! echo "$SIGN_INFO" | grep -q "flags=.*runtime"; then
+    echo "ERROR: Hardened runtime flag not set. Notarization will fail."
+    exit 1
+fi
+if ! echo "$SIGN_INFO" | grep -q "Timestamp="; then
+    echo "ERROR: Secure timestamp not set. Notarization will fail."
+    exit 1
+fi
+echo "Hardened runtime + timestamp confirmed."
 
-# Create DMG for distribution
-DMG_PATH="$BUILD_DIR/$APP_NAME-v$VERSION.dmg"
+# ── Step 4: Create DMG ──
+echo ""
+echo "Creating DMG..."
 DMG_TEMP="$BUILD_DIR/dmg-staging"
 rm -rf "$DMG_TEMP" "$DMG_PATH"
 mkdir -p "$DMG_TEMP"
 
-# Stage app and Applications symlink for drag-to-install
 cp -R "$APP_BUNDLE" "$DMG_TEMP/"
 ln -s /Applications "$DMG_TEMP/Applications"
 
-# Create DMG
 hdiutil create -volname "$APP_NAME v$VERSION" \
     -srcfolder "$DMG_TEMP" \
     -ov -format UDZO \
@@ -124,22 +142,37 @@ hdiutil create -volname "$APP_NAME v$VERSION" \
 
 rm -rf "$DMG_TEMP"
 
-# Sign the DMG
 codesign --force --sign "$SIGN_IDENTITY" "$DMG_PATH"
-echo "DMG signed."
+echo "DMG created and signed."
 
-# Notarize
+# ── Step 5: Notarize ──
 echo ""
-echo "Submitting for notarization (this may take a few minutes)..."
+echo "Submitting for notarization..."
 xcrun notarytool submit "$DMG_PATH" \
     --keychain-profile "$NOTARY_PROFILE" \
     --wait 2>&1
 
-# Staple the notarization ticket
 echo "Stapling notarization ticket..."
 xcrun stapler staple "$DMG_PATH"
 
 echo ""
-echo "Distribution DMG: $DMG_PATH"
-echo "   Signed, notarized, and ready for distribution."
-echo "   Upload this to GitHub Releases."
+echo "=== Build complete ==="
+echo "   DMG: $DMG_PATH"
+echo "   Version: $VERSION (build $BUILD_NUMBER)"
+echo "   Signed, notarized, stapled."
+
+# ── Step 6: GitHub Release (if --release) ──
+if [ "$DO_RELEASE" = true ]; then
+    echo ""
+    echo "Creating GitHub release v$VERSION..."
+
+    if [ -z "$RELEASE_NOTES" ]; then
+        RELEASE_NOTES="ConsoleForge v$VERSION"
+    fi
+
+    gh release create "v$VERSION" "$DMG_PATH" \
+        --title "$APP_NAME v$VERSION" \
+        --notes "$RELEASE_NOTES"
+
+    echo "GitHub release published."
+fi

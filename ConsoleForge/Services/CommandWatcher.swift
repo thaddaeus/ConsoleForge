@@ -14,6 +14,8 @@ struct TabCommand: Codable {
     var additionalFlags: [String]?
     var tabColor: String?
     var continueSession: Bool?
+    /// Tab ID for close-tab action (matches CONSOLEFORGE_TAB_ID env var)
+    var tabID: String?
 }
 
 class CommandWatcher {

@@ -28,6 +28,7 @@ struct ConsoleForgeApp: App {
     @State private var store = SessionStore()
     @State private var commandWatcher = CommandWatcher()
     @State private var updateChecker = UpdateChecker()
+    @State private var showFDAPrompt = false
 
     var body: some Scene {
         WindowGroup {
@@ -40,6 +41,20 @@ struct ConsoleForgeApp: App {
                     }
                     commandWatcher.start()
                     updateChecker.checkForUpdates()
+
+                    // Prompt for Full Disk Access on first launch, or if not yet granted
+                    if !hasFullDiskAccess() {
+                        let dismissed = UserDefaults.standard.bool(forKey: "fdaPromptDismissed")
+                        if !dismissed {
+                            showFDAPrompt = true
+                        }
+                    }
+                }
+                .sheet(isPresented: $showFDAPrompt) {
+                    FullDiskAccessView {
+                        UserDefaults.standard.set(true, forKey: "fdaPromptDismissed")
+                        showFDAPrompt = false
+                    }
                 }
         }
         .windowStyle(.titleBar)
@@ -108,6 +123,15 @@ struct ConsoleForgeApp: App {
     }
 
     private func handleCommand(_ command: TabCommand) {
+        switch command.action {
+        case "close-tab":
+            handleCloseTab(command)
+        default:
+            handleOpenTab(command)
+        }
+    }
+
+    private func handleOpenTab(_ command: TabCommand) {
         var config = SessionConfiguration()
         config.name = command.name ?? "Dynamic Session"
         config.workingDirectory = command.workingDirectory ?? "~"
@@ -128,5 +152,21 @@ struct ConsoleForgeApp: App {
 
         // Bring ConsoleForge to the front
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func handleCloseTab(_ command: TabCommand) {
+        // Close by tab ID (used by --close-self)
+        if let tabIDStr = command.tabID, let tabID = UUID(uuidString: tabIDStr) {
+            store.closeTab(sessionID: tabID)
+            return
+        }
+        // Close by name (used by --close --name)
+        if let name = command.name {
+            if let session = store.sessions.first(where: {
+                $0.name == name && store.openTabIDs.contains($0.id)
+            }) {
+                store.closeTab(sessionID: session.id)
+            }
+        }
     }
 }

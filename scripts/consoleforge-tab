@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-consoleforge-tab - Open a new tab in ConsoleForge
+consoleforge-tab - Control tabs in ConsoleForge
 
 Usage:
-  consoleforge-tab [options]
+  consoleforge-tab [options]              Open a new tab
+  consoleforge-tab --close-self           Close the current tab (from within a session)
+  consoleforge-tab --close --name NAME    Close a tab by name
 
-Options:
+Open options:
   --name NAME              Tab name (default: "Dynamic Session")
   --cwd PATH               Working directory
   --model MODEL            Claude model (opus, sonnet, haiku)
@@ -19,9 +21,15 @@ Options:
   --color HEX              Tab color (e.g. "#FF2D55")
   --continue               Continue previous session
 
+Close options:
+  --close-self             Close the tab this command runs in (reads CONSOLEFORGE_TAB_ID)
+  --close                  Close a tab (requires --name)
+  --name NAME              Name of the tab to close (with --close)
+
 Examples:
   consoleforge-tab --name "Issue #42" --cwd ~/projects/myapp --prompt "Summarize issue 42"
-  consoleforge-tab --cwd /tmp/worktree --permission-mode plan --flag "--dangerously-skip-permissions"
+  consoleforge-tab --close-self
+  consoleforge-tab --close --name "Feature Work"
 """
 
 import json
@@ -32,11 +40,34 @@ import time
 COMMANDS_DIR = os.path.expanduser("~/Library/Application Support/ConsoleForge/commands")
 os.makedirs(COMMANDS_DIR, exist_ok=True)
 
+def send_command(cmd):
+    filename = f"{int(time.time())}-{os.getpid()}.json"
+    filepath = os.path.join(COMMANDS_DIR, filename)
+    tmppath = filepath + ".tmp"
+    with open(tmppath, "w") as f:
+        json.dump(cmd, f, indent=2)
+    os.rename(tmppath, filepath)
+
 def main():
-    cmd = {"action": "open-tab"}
-    flags = []
     args = sys.argv[1:]
     i = 0
+
+    # Check for close modes first
+    if "--close-self" in args:
+        tab_id = os.environ.get("CONSOLEFORGE_TAB_ID")
+        if not tab_id:
+            print("Error: CONSOLEFORGE_TAB_ID not set. --close-self only works inside a ConsoleForge tab.", file=sys.stderr)
+            sys.exit(1)
+        send_command({"action": "close-tab", "tabID": tab_id})
+        print("Close command sent to ConsoleForge")
+        return
+
+    is_close = "--close" in args
+    if is_close:
+        args = [a for a in args if a != "--close"]
+
+    cmd = {"action": "close-tab" if is_close else "open-tab"}
+    flags = []
 
     while i < len(args):
         arg = args[i]
@@ -71,19 +102,19 @@ def main():
             print(f"Unknown option: {arg}", file=sys.stderr)
             sys.exit(1)
 
+    if is_close:
+        if "name" not in cmd:
+            print("Error: --close requires --name to identify the tab", file=sys.stderr)
+            sys.exit(1)
+        send_command(cmd)
+        print(f"Close command sent for tab: {cmd['name']}")
+        return
+
     if flags:
         cmd["additionalFlags"] = flags
 
-    filename = f"{int(time.time())}-{os.getpid()}.json"
-    filepath = os.path.join(COMMANDS_DIR, filename)
-
-    # Write to tmp then rename for atomicity
-    tmppath = filepath + ".tmp"
-    with open(tmppath, "w") as f:
-        json.dump(cmd, f, indent=2)
-    os.rename(tmppath, filepath)
-
-    print(f"Tab command sent to ConsoleForge")
+    send_command(cmd)
+    print("Tab command sent to ConsoleForge")
 
 if __name__ == "__main__":
     main()

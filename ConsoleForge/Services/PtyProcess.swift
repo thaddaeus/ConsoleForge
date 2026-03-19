@@ -5,7 +5,6 @@ import Foundation
 class PtyProcess {
     let masterFd: Int32
     let pid: pid_t
-    private var io: DispatchIO?
     private var readSource: DispatchSourceRead?
     private var processMonitor: DispatchSourceProcess?
     private let queue = DispatchQueue(label: "com.thaddaeus.consoleforge.pty")
@@ -118,12 +117,10 @@ class PtyProcess {
         }
         processMonitor?.resume()
 
-        // Read from master PTY — cleanup handler closes the fd when DispatchIO is done
-        io = DispatchIO(type: .stream, fileDescriptor: master, queue: queue) { fd in
-            close(fd)
-        }
-        // Use raw read(2) on a dispatch source for better throughput.
-        // DispatchIO's incremental read with lowWater=1 causes excessive main-thread dispatches.
+        // Read from master PTY using a dispatch source for throughput.
+        // We use raw read(2)/write(2) instead of DispatchIO to avoid fd guard
+        // conflicts — DispatchIO guards the fd, which crashes if another dispatch
+        // source also operates on it.
         let readSource = DispatchSource.makeReadSource(fileDescriptor: master, queue: queue)
         readSource.setEventHandler { [weak self] in
             let bufSize = 8192
@@ -139,16 +136,26 @@ class PtyProcess {
                 readSource.cancel()
             }
         }
-        readSource.setCancelHandler { /* fd closed by DispatchIO cleanup */ }
+        readSource.setCancelHandler {
+            close(master)
+        }
         readSource.resume()
         self.readSource = readSource
     }
 
     func write(_ data: Data) {
-        data.withUnsafeBytes { buffer in
-            guard let baseAddress = buffer.baseAddress else { return }
-            let dispatchData = DispatchData(bytes: UnsafeRawBufferPointer(start: baseAddress, count: buffer.count))
-            io?.write(offset: 0, data: dispatchData, queue: queue) { _, _, _ in }
+        let copy = data
+        queue.async { [weak self] in
+            guard let fd = self?.masterFd else { return }
+            copy.withUnsafeBytes { buffer in
+                guard let base = buffer.baseAddress else { return }
+                var written = 0
+                while written < buffer.count {
+                    let n = Darwin.write(fd, base + written, buffer.count - written)
+                    if n <= 0 { break }
+                    written += n
+                }
+            }
         }
     }
 
@@ -166,10 +173,8 @@ class PtyProcess {
 
     deinit {
         processMonitor?.cancel()
+        // Cancelling the read source triggers its cancel handler, which closes masterFd
         readSource?.cancel()
-        // DispatchIO.close() triggers the cleanup handler which closes masterFd
-        // Do NOT close masterFd here — that races with DispatchIO and causes EV_VANISHED
-        io?.close()
     }
 
     enum PtyError: Error {
