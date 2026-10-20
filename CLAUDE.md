@@ -396,7 +396,13 @@ console tab still orphan silently. Non-interactive closes — the CLI's `--close
 process exit — call `closeTab` directly and never prompt.
 
 The Documents section is a **read-only viewer** by decision, not omission (Tadd,
-2026-08-12). Its `layout.json` key stays `editor` — renaming a persistence key to track a
+2026-08-12). It renders TEXT and IMAGES; image support exists because sessions kept
+opening screenshots and getting the "Not a text file" dead-end. Detection hangs off the
+BINARY branch of `DocumentLoad.read` rather than running first, which is load-bearing:
+ImageIO decodes SVG, so asking it about every file would render SVG source as a picture
+instead of showing the text somebody opened the viewer to read. Images are never
+truncated — there is no useful prefix of a PNG — so they get `maxImageBytes` instead of
+`maxBytes`, and 1:1 zoom divides by `displayScale` because `NSImage.size` is in POINTS. Its `layout.json` key stays `editor` — renaming a persistence key to track a
 scope decision would orphan every saved layout — but its user-facing name says what it
 does. No save path, no dirty state, no file watcher; the toolbar's Reload is how an
 external change is picked up.
