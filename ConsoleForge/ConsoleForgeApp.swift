@@ -412,6 +412,8 @@ struct ConsoleForgeApp: App {
             BrowserControl.shared.handle(command)
         case "open-document":
             handleOpenDocument(command)
+        case "close-document":
+            handleCloseDocument(command)
         case "open-tab", "":
             handleOpenTab(command)
         default:
@@ -505,6 +507,33 @@ struct ConsoleForgeApp: App {
         }
         respond(requestID, ["ok": true, "path": path, "tabID": id.uuidString,
                             "focused": callerIsActive])
+    }
+
+    /// Close a document the CALLING tab opened.
+    ///
+    /// `--close --name` cannot do this and deliberately still cannot: it addresses console
+    /// tabs, whose vocabulary is sessions with a process. A document is addressed by path,
+    /// the same as `--open-document`, and may only be closed by the tab that opened it —
+    /// so a session can take back what it put in the panel without being able to reach
+    /// into anyone else's.
+    private func handleCloseDocument(_ command: TabCommand) {
+        guard let raw = command.path, !raw.isEmpty else {
+            respond(command.requestID, ["ok": false, "error": "no path given"])
+            return
+        }
+        let path = (raw as NSString).expandingTildeInPath
+        let opener = command.tabID.flatMap(UUID.init(uuidString:))
+
+        switch store.closeDocumentTab(path: path, openerTabID: opener) {
+        case .closed(let id):
+            respond(command.requestID, ["ok": true, "path": path, "tabID": id.uuidString])
+        case .notOpen:
+            respond(command.requestID, ["ok": false, "error": "no open document for: \(path)"])
+        case .notTheOpener(let owner):
+            respond(command.requestID,
+                    ["ok": false,
+                     "error": "that document was opened by \(owner); only its opener can close it"])
+        }
     }
 
     /// Reply on the same responses/ channel the browser verbs use.

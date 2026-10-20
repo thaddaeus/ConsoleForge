@@ -408,6 +408,42 @@ class SessionStore {
         return config.id
     }
 
+    /// What a `--close-document` request resolved to.
+    enum DocumentCloseOutcome: Equatable {
+        case closed(UUID)
+        case notOpen
+        /// Refused: the document belongs to a different console tab, named here so the
+        /// caller can say WHOSE panel it declined to reach into.
+        case notTheOpener(ownerName: String)
+    }
+
+    /// Close a document tab on behalf of the session that opened it.
+    ///
+    /// THE OPENER IS THE OWNER. `parentTabID` already records which console tab a document
+    /// was opened from, so the permission question is already answered by existing state —
+    /// no new ownership concept is introduced. A session may take back what it put in the
+    /// panel and nothing else, which is what keeps one tab from reaching into another's.
+    ///
+    /// Addressed by PATH, matching `openDocumentTab`. Names here are basenames and two
+    /// `report.md` tabs from different directories are ordinary, so a name is not an
+    /// address. The console strip's selection is never touched: `closeTab` on a document
+    /// moves `activeDocumentTabID` only, and moving `activeTabID` would unmount the live
+    /// terminal view (Phase B).
+    @discardableResult
+    func closeDocumentTab(path: String, openerTabID: UUID?) -> DocumentCloseOutcome {
+        let resolved = (path as NSString).expandingTildeInPath
+        guard let id = documentTabIDs.first(where: { session(for: $0)?.documentPath == resolved })
+        else { return .notOpen }
+
+        let owner = session(for: id)?.parentTabID
+        guard let openerTabID, owner == openerTabID else {
+            let name = owner.flatMap { session(for: $0)?.name } ?? "another session"
+            return .notTheOpener(ownerName: name)
+        }
+        closeTab(sessionID: id, reason: .selfClose)
+        return .closed(id)
+    }
+
     /// Save an ephemeral tab as a permanent session (promotes to sidebar).
     func saveEphemeralSession(id: UUID) {
         if let idx = sessions.firstIndex(where: { $0.id == id }) {
