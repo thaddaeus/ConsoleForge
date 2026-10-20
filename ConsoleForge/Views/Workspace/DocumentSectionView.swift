@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 
 /// The Documents section: its OWN tab strip plus a read-only view of whichever document
 /// that strip has selected.
@@ -187,8 +188,9 @@ struct DocumentTabBar: View {
         let parentColor = groupParentColor(for: session)
         let capsGroup = parentColor != nil && isLastInGroup(session)
         let missing = session.documentPath.map { !FileManager.default.fileExists(atPath: $0) } ?? true
+        let isImage = session.documentPath.map { DocumentLoad.looksLikeImagePath($0) } ?? false
         return HStack(spacing: 6) {
-            Image(systemName: missing ? "questionmark.square.dashed" : "doc.text")
+            Image(systemName: missing ? "questionmark.square.dashed" : (isImage ? "photo" : "doc.text"))
                 .font(.caption2)
                 .foregroundStyle(missing ? Color.orange : Color.secondary)
 
@@ -298,6 +300,10 @@ struct DocumentTabBar: View {
 struct DocumentViewer: View {
     let path: String
     @State private var load: DocumentLoad = .loading
+    /// Image zoom. Lives here rather than in `ImageDocumentView` because the toolbar
+    /// button that flips it is in THIS view, and the viewer is keyed by path, so switching
+    /// documents resets it anyway.
+    @State private var actualSize = false
     /// Bumped on every (re)load so `ReadOnlyTextView` can tell "same document, new
     /// content" from "same content, parent re-rendered" without comparing megabytes of
     /// string on every SwiftUI update pass.
@@ -342,6 +348,27 @@ struct DocumentViewer: View {
                     .foregroundStyle(.tertiary)
             }
 
+            if case .image(let image) = load {
+                Text("\(image.pixelWidth) × \(image.pixelHeight)")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+
+                // Fit is the default, but a screenshot of a terminal is unreadable
+                // scaled down, which is the main thing being opened here — so 1:1 is one
+                // click away rather than a thing you cannot reach.
+                Button {
+                    actualSize.toggle()
+                } label: {
+                    Image(systemName: actualSize ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 10))
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(actualSize ? Color.accentColor : .secondary)
+                .help(actualSize ? "Fit to the panel" : "Show at actual pixel size")
+            }
+
             Button {
                 Task { await reload() }
             } label: {
@@ -378,6 +405,8 @@ struct DocumentViewer: View {
             notice("Loading…", symbol: "hourglass", tint: .secondary)
         case .text(let text, _, _):
             ReadOnlyTextView(text: text, revision: revision)
+        case .image(let image):
+            ImageDocumentView(image: image, actualSize: actualSize)
         case .missing:
             notice("This file is no longer on disk.\n\(path)", symbol: "questionmark.square.dashed", tint: .orange)
         case .binary(let bytes):
@@ -409,13 +438,35 @@ enum DocumentLoad: Equatable, Sendable {
     case loading
     /// Decoded text, its line count, and whether it was cut short at `maxBytes`.
     case text(String, lines: Int, truncated: Bool)
+    /// A decodable picture, carried WHOLE. Unlike text there is no useful prefix of an
+    /// image, so this case never participates in `maxBytes` truncation.
+    case image(Image)
     case binary(bytes: Int)
     case missing
     case failed(String)
 
+    /// Everything the viewer needs to draw a picture, with no `NSImage` in sight.
+    ///
+    /// `DocumentLoad` is `Sendable` because `read` runs on a detached task, and `NSImage`
+    /// is not — so the bytes cross the boundary and the view decodes them. Dimensions are
+    /// read from the file HEADER rather than from a decoded `NSImage.size`, which reports
+    /// POINTS: a screenshot carrying DPI metadata would otherwise report fewer pixels than
+    /// it has, and 1:1 zoom would be a lie.
+    struct Image: Equatable, Sendable {
+        var data: Data
+        var pixelWidth: Int
+        var pixelHeight: Int
+        var byteCount: Int
+    }
+
     /// Files bigger than this are shown truncated. A viewer that stalls the UI loading a
     /// 200 MB log is worse than one that says it only read the first slice.
     static let maxBytes = 4 * 1024 * 1024
+
+    /// Images are never truncated, so they get their own, much larger ceiling. A 6K
+    /// retina screenshot is several times `maxBytes` and is exactly the file this feature
+    /// exists to open — capping images at the text limit would reject the common case.
+    static let maxImageBytes = 64 * 1024 * 1024
 
     static func read(_ path: String) -> DocumentLoad {
         let url = URL(fileURLWithPath: path)
@@ -427,15 +478,115 @@ enum DocumentLoad: Equatable, Sendable {
             // A NUL byte in the first block is the cheap, reliable binary test — it never
             // appears in UTF-8 text and appears almost immediately in object files,
             // images and archives.
-            if slice.prefix(8192).contains(0) { return .binary(bytes: data.count) }
+            //
+            // Image detection hangs off the BINARY branch rather than running first, and
+            // that ordering is the whole design. Asking ImageIO about every file instead
+            // would reclassify an SVG as a picture — ImageIO decodes SVG, but SVG is
+            // source somebody opened this viewer to READ. Screenshots are binary; text you
+            // want to read is text; so the question "is this a picture?" only ever gets
+            // asked about bytes we were otherwise going to refuse.
+            if slice.prefix(8192).contains(0) {
+                return image(data) ?? .binary(bytes: data.count)
+            }
             guard let text = String(data: slice, encoding: .utf8)
                     ?? String(data: slice, encoding: .isoLatin1) else {
-                return .binary(bytes: data.count)
+                return image(data) ?? .binary(bytes: data.count)
             }
             return .text(text, lines: text.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }, truncated: truncated)
         } catch {
             return .failed("Could not read this file.\n\(error.localizedDescription)")
         }
+    }
+
+    /// Does this PATH look like a picture? For choosing a tab glyph only.
+    ///
+    /// Extension-based on purpose. The authoritative answer is `image(_:)`, which needs the
+    /// file's bytes — and the tab strip re-renders on every hover and splitter drag, so
+    /// asking it there would re-read every open document off disk to pick an icon.
+    static func looksLikeImagePath(_ path: String) -> Bool {
+        let ext = (path as NSString).pathExtension.lowercased()
+        guard !ext.isEmpty else { return false }
+        return ["png", "jpg", "jpeg", "gif", "heic", "heif", "tiff", "tif",
+                "bmp", "webp", "ico", "icns", "jp2", "avif"].contains(ext)
+    }
+
+    /// `.image` when ImageIO can read a pixel size out of `data`, else nil.
+    ///
+    /// `CGImageSourceCopyPropertiesAtIndex` parses the header only — it does not decode
+    /// the pixels — so this stays cheap enough to run on every binary file we were about
+    /// to turn away. A format ImageIO cannot read returns nil and the binary notice
+    /// survives, which is what `testBinaryThatIsNotAnImageStillReportsBinary` pins.
+    static func image(_ data: Data) -> DocumentLoad? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0,
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = props[kCGImagePropertyPixelWidth] as? Int,
+              let height = props[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0 else { return nil }
+        guard data.count <= maxImageBytes else {
+            let size = ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+            let cap = ByteCountFormatter.string(fromByteCount: Int64(maxImageBytes), countStyle: .file)
+            return .failed("This image is \(size), over the viewer's \(cap) limit.\nOpen it in Preview instead — truncating an image would only corrupt it.")
+        }
+        return .image(Image(data: data, pixelWidth: width, pixelHeight: height, byteCount: data.count))
+    }
+}
+
+/// One picture, either fitted to the panel or at true 1:1.
+///
+/// Decoded HERE, from the bytes `DocumentLoad` carried, because `NSImage` is not
+/// `Sendable` and the load runs off the main actor.
+///
+/// 1:1 means one image pixel per DEVICE pixel, which is why the frame divides by
+/// `displayScale`: `NSImage.size` is in POINTS, so on a 2x display a 3024-pixel-wide
+/// screenshot shown at 3024 points is drawn at double size and looks soft. This is the
+/// same scale discipline `TerminalMetrics` applies to the terminal cell — getting it from
+/// the wrong display is a visible error, not a rounding one.
+struct ImageDocumentView: View {
+    let image: DocumentLoad.Image
+    let actualSize: Bool
+    @Environment(\.displayScale) private var displayScale
+
+    private var nsImage: NSImage? { NSImage(data: image.data) }
+
+    var body: some View {
+        Group {
+            if let nsImage {
+                if actualSize {
+                    ScrollView([.horizontal, .vertical]) {
+                        Image(nsImage: nsImage)
+                            .resizable()
+                            .interpolation(.none)   // 1:1 resamples nothing
+                            .frame(width: CGFloat(image.pixelWidth) / displayScale,
+                                   height: CGFloat(image.pixelHeight) / displayScale)
+                            .padding(8)
+                    }
+                } else {
+                    Image(nsImage: nsImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(8)
+                }
+            } else {
+                // Header parsed but the pixels will not decode — a truncated or corrupt
+                // file. Say so rather than showing an empty panel.
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.orange)
+                    Text("This image reports \(image.pixelWidth) × \(image.pixelHeight) but its pixels could not be decoded.")
+                        .font(.system(size: 11))
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        // A checkerboard would be noise; a flat panel background lets a transparent PNG
+        // read against the same surface as every other section.
+        .background(Color(nsColor: .textBackgroundColor))
     }
 }
 
