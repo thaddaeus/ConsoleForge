@@ -38,6 +38,9 @@ Close options:
 Document options:
   --open-document PATH     Open a file in the app's Documents panel, as a tab parented to
                            this one. Prints a JSON reply; exits non-zero if it failed.
+  --close-document PATH    Close a document THIS TAB opened. Only the opener may close a
+                           document, so this cannot reach into another tab's panel.
+                           Prints a JSON reply; exits non-zero if it failed.
 
 Browser options — the app's own Safari panel (what the human is looking at).
 These print a JSON reply and exit non-zero if the action failed:
@@ -355,6 +358,25 @@ def main():
         # document strip's selection should move (only if you are on that tab already).
         if tab_id:
             cmd["tabID"] = tab_id
+        emit_reply(send_request(cmd))
+
+    # The counterpart to --open-document. A session that put a file in the panel can take
+    # it back out; one that did not, cannot. Addressed by PATH, not by name, because
+    # document tab names are basenames and two report.md tabs are ordinary.
+    if "--close-document" in args:
+        i = args.index("--close-document")
+        if i + 1 >= len(args) or args[i + 1].startswith("--"):
+            print("Error: --close-document needs a file path", file=sys.stderr)
+            sys.exit(1)
+        tab_id = os.environ.get("CONSOLEFORGE_TAB_ID")
+        if not tab_id:
+            print("Error: CONSOLEFORGE_TAB_ID not set. --close-document only works inside "
+                  "a ConsoleForge tab, since only a document's opener may close it.",
+                  file=sys.stderr)
+            sys.exit(1)
+        cmd = {"action": "close-document",
+               "path": os.path.abspath(os.path.expanduser(args[i + 1])),
+               "tabID": tab_id}
         emit_reply(send_request(cmd))
 
     # Hand the human a real browser WINDOW — a managed Chrome owned by this tab, which
