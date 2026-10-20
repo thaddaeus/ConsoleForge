@@ -385,6 +385,15 @@ Terminal worktree-tab grouping is deliberately unchanged: console children of a 
 console tab still orphan silently. Non-interactive closes — the CLI's `--close-self`, a
 process exit — call `closeTab` directly and never prompt.
 
+**A document is closed by its OPENER, and addressed by PATH.** `--close --name` reaches
+console tabs only — the CLI's close vocabulary is sessions with a process — so a session
+that put a file in the panel had no way to take it back out. `--close-document PATH` is
+the counterpart to `--open-document`, and `SessionStore.closeDocumentTab` refuses unless
+the caller's tab id matches the document's `parentTabID`. That introduces no new ownership
+concept: `parentTabID` is already recorded at open, so the permission question was already
+answered by existing state. Path, not name, because document tab names are basenames and
+two `report.md` tabs from different directories are ordinary.
+
 The Documents section is a **read-only viewer** by decision, not omission (Tadd,
 2026-08-12). It renders TEXT and IMAGES; image support exists because sessions kept
 opening screenshots and getting the "Not a text file" dead-end. Detection hangs off the
