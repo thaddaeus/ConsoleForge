@@ -20,7 +20,8 @@
       "--disallowedTools",
       "--mcp-config",
       "--continue",
-      "--effort"
+      "--effort",
+      "--remote-control"
     ],
     "env_vars_we_set": [
       "TERM=xterm-256color",

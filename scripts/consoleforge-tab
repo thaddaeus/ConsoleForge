@@ -19,6 +19,10 @@ Open options:
   --prompt TEXT             Initial prompt (visible, sent as first message)
   --mcp-config PATH        MCP config file path
   --flag FLAG              Additional CLI flag (can be repeated)
+  --remote-control [NAME]  Launch with Claude Remote Control enabled, so the session
+                           shows up in the Claude app's reachable list. NAME defaults
+                           to the tab name. RC is a LAUNCH-ONLY flag: an already-running
+                           session cannot be registered after the fact.
   --color HEX              Tab color (e.g. "#FF2D55")
   --continue               Continue previous session
   --no-group               Don't group under the spawning tab (when run inside a
@@ -69,6 +73,7 @@ Examples:
 """
 
 import json
+import shlex
 import os
 import sys
 import time
@@ -404,6 +409,8 @@ def main():
     cmd = {"action": "close-tab" if is_close else "open-tab"}
     flags = []
     no_group = False
+    rc_requested = False
+    rc_name = None
 
     while i < len(args):
         arg = args[i]
@@ -430,6 +437,13 @@ def main():
             cmd["mcpConfigPath"] = args[i + 1]; i += 2
         elif arg == "--flag" and i + 1 < len(args):
             flags.append(args[i + 1]); i += 2
+        elif arg == "--remote-control":
+            rc_requested = True
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if nxt is not None and not nxt.startswith("--"):
+                rc_name = nxt; i += 2
+            else:
+                i += 1
         elif arg == "--color" and i + 1 < len(args):
             cmd["tabColor"] = args[i + 1]; i += 2
         elif arg == "--browser":
@@ -450,6 +464,21 @@ def main():
         send_command(cmd)
         print(f"Close command sent for tab: {cmd['name']}")
         return
+
+    # Resolved after the loop so --remote-control may appear BEFORE --name.
+    #
+    # The name is always emitted explicitly, never the bare flag. `--remote-control`
+    # takes an OPTIONAL argument, and ClaudeProcessBuilder appends additionalFlags
+    # ahead of the initial prompt's bare positional — so a bare flag makes Claude read
+    # the PROMPT as the RC session name and the tab launches with no prompt at all.
+    #
+    # shlex.quote because additionalFlags are passed through RAW: the builder does
+    # parts.append(contentsOf: extraFlags) then joins on " " and hands the string to
+    # `zsh -l -c`. Unquoted, a tab named "App: IDEA Base" would split into three
+    # tokens and only "App:" would survive as the name.
+    if rc_requested:
+        resolved = rc_name or cmd.get("name") or "Dynamic Session"
+        flags.append(f"--remote-control {shlex.quote(resolved)}")
 
     if flags:
         cmd["additionalFlags"] = flags
