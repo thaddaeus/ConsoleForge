@@ -32,6 +32,28 @@ final class ManagedChromeMCPConfigTests: XCTestCase {
         return try XCTUnwrap(server["args"] as? [String])
     }
 
+    /// GitHub #48: left to itself the server's Puppeteer launches STABLE Chrome — the
+    /// user's own bundle — and a Dock launch of Chrome then activates our headless
+    /// instance, which can never draw a window. This self-launch path is the one the
+    /// takeover was actually observed on, so the binary has to be named here.
+    func testSelfLaunchedBrowserIsPinnedToTheBundleWeResolved() throws {
+        let args = try mcpArgs(appOwned: false)
+        let i = try XCTUnwrap(args.firstIndex(of: "--executablePath"),
+                              "the self-launch config must name the browser binary, or "
+                              + "Puppeteer picks the user's own Chrome; args were \(args)")
+        XCTAssertEqual(args[args.index(after: i)], ManagedChrome.binary)
+    }
+
+    /// The wrapper's own fallback self-launches a browser too, so the pin has to reach it.
+    /// Passed through from here rather than re-resolved in python, because two copies of
+    /// the candidate order is the divergence this file already exists to catch.
+    func testTheWrapperPathAlsoCarriesTheBundlePin() throws {
+        let args = try mcpArgs(appOwned: true)
+        let i = try XCTUnwrap(args.firstIndex(of: "--executablePath"),
+                              "args were \(args)")
+        XCTAssertEqual(args[args.index(after: i)], ManagedChrome.binary)
+    }
+
     /// The bug, stated directly: without the fix there is no `--chromeArg` at all.
     func testSelfLaunchedBrowserIsGivenTheLocalNetworkAccessFlags() throws {
         let args = try mcpArgs(appOwned: false)

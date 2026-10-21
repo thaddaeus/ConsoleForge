@@ -117,7 +117,7 @@ target, so `WorkspaceLayout`, `LayoutStore`, `TabStripModel`, `ClaudeProcessBuil
 had to be refactored for this; there simply was no test target until 2026-08-21.
 
 **Tier 2 — the live harnesses in `scripts/`.** `geometry-pass.py` (terminal geometry
-through the real Layout menu) and `chrome-lifecycle-test.py` (25 teardown checks). These
+through the real Layout menu) and `chrome-lifecycle-test.py` (26 teardown checks). These
 cover what a unit test structurally cannot: AppKit hosting, real SwiftTerm reflow, Chrome
 under launchd. Beta only. Do not try to move these into Tier 1 — and do not skip them for
 anything touching layout, terminal sizing, or the browser lifecycle.
@@ -425,6 +425,33 @@ launching the binary directly) rather than handed to `open`, which would detach 
 launchd and leave nothing to terminate. Embedding would mean CEF: a second browser engine
 to keep patched, for a rectangle.
 
+**An agent browser never runs from the user's own Chrome bundle** (GitHub #48). macOS
+LaunchServices tracks running applications by BUNDLE, so a headless `com.google.Chrome` is
+registered as a running instance of the user's desktop Chrome. With their Chrome quit, a
+Dock / Spotlight / `open` launch does not start a new process — it ACTIVATES one of ours,
+which becomes frontmost and can never draw a window. Observed 2026-10-20: Chrome's menu bar
+with no window, nothing in the Window menu, and three Force Quits that each killed a tab's
+agent browser instead of Chrome. So `resolveAgentBrowser` prefers **Chrome for Testing**
+(`com.google.chrome.for.testing`) — a separate bundle that keeps the real `--headless=new`
+rendering path, unlike `chrome-headless-shell`, which is the old headless implementation and
+is not an app bundle at all. Canary and Chromium carry their own ids and are safe for the
+same reason; the user's own Chrome is accepted LAST, so a machine with nothing else can
+still browse, and flagged — `usesDesktopChromeBundle` drives a warning in the Layout menu,
+because this is the one configuration the bug lives in. When that is all we find, the app
+fetches Chrome for Testing once per run via `npx -y @puppeteer/browsers install chrome@stable`;
+without that the fix would silently do nothing on a fresh install. It lands in
+`~/.cache/puppeteer`, the SAME cache chrome-devtools-mcp's own Puppeteer resolves from, so
+one download serves both launch paths.
+
+**Which bundle is OUR decision on every path, including the ones we do not launch.** Left
+to itself the MCP server's Puppeteer resolves stable Chrome, and that self-launch path is
+where the takeover was actually observed — so `writeSessionMCPConfig` passes
+`--executablePath`, and passes it on the wrapper path too, as a passthrough argument rather
+than a second resolution. Re-deriving the candidate order in `scripts/consoleforge-chrome-mcp`
+would be the same silent divergence the `localNetworkAccessFlag` comment warns about: the
+server ignores `--executablePath` when it connects by `--browserUrl`, exactly as it ignores
+`--chromeArg`.
+
 **Two profiles, because two Chromes cannot share a `--user-data-dir`** (single-instance
 lock). That is a real seam: a login done in the window is invisible to the headless one.
 The resolution is that BOTH publish a debugging port, so after signing in the agent
@@ -437,7 +464,7 @@ thing it cannot do for itself, and what it needs when it hits a sign-in wall. Th
 deliberately the ONLY browser verb in the CLI: general session→browser control is task
 9925.
 
-Four teardown paths, all tested by `./scripts/chrome-lifecycle-test.py` (25 checks):
+Four teardown paths, all tested by `./scripts/chrome-lifecycle-test.py` (26 checks):
 closing the tab (both browsers), the CLI close path, quitting the app, and
 **force-killing** it — a child is NOT killed by its parent dying, so SIGKILL strands the
 browser under launchd. Each instance records its pid so `reapOrphans()` kills leftovers at
