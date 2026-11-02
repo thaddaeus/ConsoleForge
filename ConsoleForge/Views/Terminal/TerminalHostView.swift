@@ -44,6 +44,18 @@ final class TerminalSessionManager {
     /// Intermediate sizes swallowed since the last apply, for CFDebugGeometry.
     private var coalescedCount = 0
 
+    /// True while the window is in the Dock. A miniaturized window keeps reporting
+    /// frame changes, and those bounds are NOT the terminal area — they are whatever
+    /// AppKit leaves behind while it tears the window's surface down for the Dock tile.
+    /// They are small but often still above the degenerate floor, so `setSize`'s guard
+    /// waved them through and SwiftTerm reflowed the buffer to a width nothing was
+    /// written at. That is the minimize→restore garble, and it is MODEL corruption, so
+    /// no amount of repainting on restore fixes it — only the next real window resize,
+    /// which is exactly what Tadd had to do. The cure is to not reflow in the first
+    /// place: while this is set, geometry is ignored outright, and restore re-asserts
+    /// the true bounds through `resync` once they settle.
+    private(set) var isMiniaturized = false
+
     /// Trailing debounce for resize bursts. The animated fullscreen enter/exit
     /// (~0.5s) fires frameDidChange at many intermediate sizes; reflowing SwiftTerm
     /// and SIGWINCHing the PTY at each one makes Claude redraw its bottom-anchored
@@ -69,6 +81,18 @@ final class TerminalSessionManager {
     /// transition, live window drag) produces exactly one SwiftTerm reflow + PTY
     /// winsize at the final size.
     func setSize(_ size: CGSize) {
+        // Nothing the window reports from the Dock describes the terminal area. Drop
+        // it, and drop any burst already in flight with it — a debounce that fires
+        // after the window miniaturizes would apply a pre-minimize intermediate.
+        guard !isMiniaturized else {
+            GeometryTrace.shared.record("ignored",
+                "container=\(Int(size.width))×\(Int(size.height)) — window miniaturized")
+            resizeDebounce?.cancel()
+            resizeDebounce = nil
+            pendingSize = nil
+            coalescedCount = 0
+            return
+        }
         // A degenerate geometry is REJECTED outright, not clamped and not applied. The
         // old `> 1` test let a ~27pt container through as a two-column grid, and a
         // resumed session flooding its history in at two columns re-breaks every
@@ -144,6 +168,30 @@ final class TerminalSessionManager {
         }
     }
 
+    /// The window went to the Dock: stop accepting geometry until it comes back.
+    func windowDidMiniaturize() {
+        guard !isMiniaturized else { return }
+        isMiniaturized = true
+        resizeDebounce?.cancel()
+        resizeDebounce = nil
+        pendingSize = nil
+        coalescedCount = 0
+        // A settle nudge landing while minimized would jiggle the PTY for a window
+        // nobody can see, and its restore repaint is `resync`'s job anyway.
+        settleNudge?.cancel()
+        settleNudge = nil
+        GeometryTrace.shared.record("miniaturized", "geometry suspended")
+    }
+
+    /// The window came back from the Dock. Geometry is accepted again, but the caller
+    /// does NOT hand us a size here — the bounds right at restore are still mid-flight.
+    /// `TerminalHostView` polls for them to settle and then calls `resync`.
+    func windowDidDeminiaturize() {
+        guard isMiniaturized else { return }
+        isMiniaturized = false
+        GeometryTrace.shared.record("deminiaturized", "geometry resumed, awaiting settle")
+    }
+
     /// Recover the grid after an event that can desync SwiftTerm + the PTY from the
     /// view WITHOUT a reliable frame change: display sleep/wake, an external display
     /// connecting/disconnecting, or a forced un-fullscreen. The trigger that exposed
@@ -157,6 +205,7 @@ final class TerminalSessionManager {
     /// stale-width live region that a plain repaint can't fix. `size` is the
     /// container's real bounds, read at call time (not the possibly-stale cached size).
     func resync(to size: CGSize) {
+        guard !isMiniaturized else { return }
         guard TerminalMetrics.isUsable(size, scale: displayScale) else { return }
         resizeDebounce?.cancel()
         resizeDebounce = nil
@@ -261,11 +310,16 @@ struct TerminalHostView: NSViewRepresentable {
     /// mode, and sidebar width all flow through the view hierarchy to it), so this is
     /// the authoritative, AppKit-driven size source — wired to the manager's `setSize`.
     let onContainerResize: (CGSize) -> Void
-    /// Called with the container's real bounds after a sleep/wake or display
-    /// reconfiguration settles — wired to the manager's `resync`, which re-asserts the
-    /// size and forces a redraw (a plain frame change isn't guaranteed across these
-    /// events, and the existing repaint-only handlers can't fix a stale-width grid).
+    /// Called with the container's real bounds after a sleep/wake, display
+    /// reconfiguration or Dock restore settles — wired to the manager's `resync`, which
+    /// re-asserts the size and forces a redraw (a plain frame change isn't guaranteed
+    /// across these events, and the existing repaint-only handlers can't fix a
+    /// stale-width grid).
     let onResync: (CGSize) -> Void
+    /// Called when the window miniaturizes / comes back — wired to the manager, which
+    /// suspends geometry for the duration (see `TerminalSessionManager.isMiniaturized`).
+    let onMiniaturize: () -> Void
+    let onDeminiaturize: () -> Void
 
     func makeNSView(context: Context) -> NSView {
         let container = NSView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
@@ -301,20 +355,57 @@ struct TerminalHostView: NSViewRepresentable {
         // built-in screen) change the window geometry while the app is asleep, so a
         // `frameDidChange` for the final size isn't guaranteed and the grid can be left
         // desynced. Re-read the TRUE bounds once AppKit settles and force a re-sync.
+        //
+        // "Settles" is now MEASURED, not assumed. This used to be a single shot 0.5s
+        // after the notification, which is a guess about an interval nothing promises:
+        // a wake with a display change behind it hands out bounds for well over a
+        // second, so the one shot read a mid-flight size, resynced to it, and left the
+        // grid wrong — the "still doesn't settle right from sleep" half of the bug. The
+        // poller instead waits for two consecutive identical readings before it
+        // resyncs, so it fires when the geometry has actually stopped moving.
         let resyncAfterSettle: @Sendable (Notification) -> Void = { [weak coordinator = context.coordinator] _ in
             MainActor.assumeIsolated {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    guard let coordinator, let view = coordinator.container else { return }
-                    coordinator.onResync?(view.bounds.size)
-                }
+                coordinator?.scheduleResyncWhenSettled()
             }
         }
         context.coordinator.wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main, using: resyncAfterSettle
         )
+        // System wake and DISPLAY wake are different notifications: locking the screen
+        // or letting the display sleep on its own never posts `didWakeNotification`, so
+        // that path had no recovery at all.
+        context.coordinator.screensWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main, using: resyncAfterSettle
+        )
         context.coordinator.screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main, using: resyncAfterSettle
         )
+
+        // Minimize / restore. The window is not observable yet (`container.window` is
+        // nil until it joins a hierarchy), so these watch ALL windows and filter to
+        // ours at fire time — the same shape as the occlusion observer in
+        // `TerminalSession`. Restore does not pass a size: it starts the settle poller,
+        // because the bounds at the moment of deminiaturize are still mid-animation.
+        context.coordinator.onMiniaturize = onMiniaturize
+        context.coordinator.onDeminiaturize = onDeminiaturize
+        context.coordinator.miniaturizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMiniaturizeNotification, object: nil, queue: .main
+        ) { [weak coordinator = context.coordinator] note in
+            MainActor.assumeIsolated {
+                guard let coordinator, coordinator.ownsWindow(in: note) else { return }
+                coordinator.cancelSettlePoll()
+                coordinator.onMiniaturize?()
+            }
+        }
+        context.coordinator.deminiaturizeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didDeminiaturizeNotification, object: nil, queue: .main
+        ) { [weak coordinator = context.coordinator] note in
+            MainActor.assumeIsolated {
+                guard let coordinator, coordinator.ownsWindow(in: note) else { return }
+                coordinator.onDeminiaturize?()
+                coordinator.scheduleResyncWhenSettled()
+            }
+        }
         return container
     }
 
@@ -322,21 +413,29 @@ struct TerminalHostView: NSViewRepresentable {
         if let obs = coordinator.frameObserver {
             NotificationCenter.default.removeObserver(obs)
         }
-        if let obs = coordinator.wakeObserver {
+        for obs in [coordinator.wakeObserver, coordinator.screensWakeObserver].compactMap({ $0 }) {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
         }
-        if let obs = coordinator.screenObserver {
+        for obs in [coordinator.screenObserver,
+                    coordinator.miniaturizeObserver,
+                    coordinator.deminiaturizeObserver].compactMap({ $0 }) {
             NotificationCenter.default.removeObserver(obs)
         }
+        coordinator.cancelSettlePoll()
         coordinator.frameObserver = nil
         coordinator.wakeObserver = nil
+        coordinator.screensWakeObserver = nil
         coordinator.screenObserver = nil
+        coordinator.miniaturizeObserver = nil
+        coordinator.deminiaturizeObserver = nil
     }
 
     func updateNSView(_ container: NSView, context: Context) {
         // Keep the callbacks current (SwiftUI hands us fresh closures each pass).
         context.coordinator.onResize = onContainerResize
         context.coordinator.onResync = onResync
+        context.coordinator.onMiniaturize = onMiniaturize
+        context.coordinator.onDeminiaturize = onDeminiaturize
 
         let current = container.subviews.first as? TerminalView
         let target = session?.terminalView
@@ -393,10 +492,64 @@ struct TerminalHostView: NSViewRepresentable {
         var onResize: ((CGSize) -> Void)?
         /// Latest resync callback (refreshed each `updateNSView`).
         var onResync: ((CGSize) -> Void)?
+        /// Latest miniaturize callbacks (refreshed each `updateNSView`).
+        var onMiniaturize: (() -> Void)?
+        var onDeminiaturize: (() -> Void)?
         /// Token for the container's frame-change observer, removed on dismantle.
         var frameObserver: NSObjectProtocol?
         /// Tokens for the sleep/wake + screen-reconfiguration observers.
         var wakeObserver: NSObjectProtocol?
+        var screensWakeObserver: NSObjectProtocol?
         var screenObserver: NSObjectProtocol?
+        /// Tokens for the Dock minimize/restore observers.
+        var miniaturizeObserver: NSObjectProtocol?
+        var deminiaturizeObserver: NSObjectProtocol?
+
+        /// In-flight settle poll, so a second trigger (wake AND a screen change, which
+        /// routinely arrive together) restarts the wait instead of racing itself.
+        private var settlePoll: Task<Void, Never>?
+        /// How often the poller samples the container's bounds.
+        private static let settleInterval: Duration = .milliseconds(150)
+        /// Give up waiting for stability after this long and resync to whatever is
+        /// there. A geometry that never settles is a bug of its own, but leaving the
+        /// grid desynced forever is worse than resyncing to a late reading.
+        private static let settleTimeout: Duration = .seconds(3)
+
+        /// True when `note`'s window is the one hosting our container.
+        func ownsWindow(in note: Notification) -> Bool {
+            guard let window = note.object as? NSWindow, let container else { return false }
+            return window === container.window
+        }
+
+        /// Wait for the container's bounds to stop changing, then resync to them.
+        /// Requires two consecutive identical, usable readings — one reading proves
+        /// nothing, since every mid-flight size is also "a size".
+        func scheduleResyncWhenSettled() {
+            settlePoll?.cancel()
+            settlePoll = Task { [weak self] in
+                var previous: CGSize?
+                var waited: Duration = .zero
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: Self.settleInterval) } catch { return }
+                    guard let self, let view = self.container else { return }
+                    // A window in the Dock has no honest bounds to settle on; the
+                    // restore observer starts a fresh poll.
+                    if view.window?.isMiniaturized == true { return }
+                    let size = view.bounds.size
+                    waited += Self.settleInterval
+                    if size == previous || waited >= Self.settleTimeout {
+                        self.settlePoll = nil
+                        self.onResync?(size)
+                        return
+                    }
+                    previous = size
+                }
+            }
+        }
+
+        func cancelSettlePoll() {
+            settlePoll?.cancel()
+            settlePoll = nil
+        }
     }
 }
