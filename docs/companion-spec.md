@@ -210,7 +210,7 @@ Per tab we can include: `id` (UUID), `name`, `tabColorHex`, `tabIconName`
       "name": "claude — myapp",
       "colorHex": "#FF2D55",
       "icon": "terminal",            // SF Symbol name; PWA maps to its own glyph
-      "workingDirectory": "/Users/tadd/projects/myapp",
+      "workingDirectory": "/Users/<you>/projects/myapp",
       "state": "bell",               // bell | settled | exited | active | output | idle
       "exitCode": null,              // present only when state == "exited"
       "notify": true,                // relay pushes iff true

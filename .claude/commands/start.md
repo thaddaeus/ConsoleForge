@@ -32,9 +32,13 @@ and `mcp__idea-base__get_task` with `task_id: <N>`.
 - **Both resolve** → ask which, one short question, nothing else. Do not pick.
 - **Neither resolves** → say so and stop. Do not create a task, do not invent scope.
 
-ConsoleForge's IDEA Base project id is **9031**. Its task ids are 4-digit (9xxx); GitHub
-issue numbers here are small (under 100 as of 2026-08), so collisions are unlikely in
-practice — but check anyway rather than relying on the range.
+ConsoleForge's IDEA Base project id is **9031**. Its task ids are 4-digit (9xxx).
+
+⚠️ **Never infer the source from a number's magnitude.** This file used to say GitHub
+numbers here were "under 100 as of 2026-08, so collisions are unlikely in practice". That
+was a dated claim with a shrinking margin: issues and PRs share one number space and it
+stood at **49 by 2026-11**. Resolve by lookup every time, as above — the range is not a
+shortcut, and a doc that encodes today's numbers rots silently.
 
 > **Open question, not yet decided:** whether user-reported issues get logged to IDEA Base,
 > to GitHub Issues, or both. This command works either way and needs no change when that
@@ -67,8 +71,13 @@ Check `git worktree list` first — if it already exists, skip creation and reus
 ## 4. Create the worktree
 
 ```bash
-git -C /Users/tadd/projects/thaddaeus/ClaudeConnect fetch origin
-git -C /Users/tadd/projects/thaddaeus/ClaudeConnect worktree add \
+# Resolve the repo root; never bake a local path. This works when run from a
+# worktree too, because the FIRST `git worktree list` entry is always the main
+# checkout. Override with CONSOLEFORGE_REPO if the checkout lives elsewhere.
+REPO="${CONSOLEFORGE_REPO:-$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')}"
+
+git -C "$REPO" fetch origin
+git -C "$REPO" worktree add \
     -b <type>/<N>-<slug> .claude/worktrees/<task|issue>-<N> origin/main
 ```
 
@@ -80,9 +89,12 @@ Without this the spoke boots with no ConsoleForge memory and re-learns the termi
 lessons the hard way.
 
 ```bash
-WT="/Users/tadd/projects/thaddaeus/ClaudeConnect/.claude/worktrees/<task|issue>-<N>"
-HUB_MEMORY="/Users/tadd/.claude/projects/-Users-tadd-projects-thaddaeus-ClaudeConnect/memory"
-WT_PROJECT="/Users/tadd/.claude/projects/$(echo "$WT" | sed 's/[/.]/-/g')"
+# $REPO comes from step 4. Claude Code names a project dir by replacing `/` and
+# `.` in the absolute path with `-`, so BOTH slugs are computed here rather than
+# baked -- which is what the WT_PROJECT line already did.
+WT="$REPO/.claude/worktrees/<task|issue>-<N>"
+HUB_MEMORY="$HOME/.claude/projects/$(echo "$REPO" | sed 's/[/.]/-/g')/memory"
+WT_PROJECT="$HOME/.claude/projects/$(echo "$WT" | sed 's/[/.]/-/g')"
 mkdir -p "$WT_PROJECT"
 ln -sfn "$HUB_MEMORY" "$WT_PROJECT/memory"
 ```
@@ -133,7 +145,7 @@ The hub does **not** enter the worktree and does **not** write the code. Hand it
 ```bash
 consoleforge-tab \
   --name "<Task 9736 | Issue #12>: <short title>" \
-  --cwd "/Users/tadd/projects/thaddaeus/ClaudeConnect/.claude/worktrees/<task|issue>-<N>" \
+  --cwd "$REPO/.claude/worktrees/<task|issue>-<N>" \
   --model <from step 7> \
   --effort <from step 7> \
   --permission-mode bypassPermissions \
