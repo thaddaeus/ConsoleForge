@@ -8,9 +8,18 @@ DerivedData/
 *.xcodeproj/
 /build/
 
-# Agent worktrees (transient)
-.claude/worktrees/
-# Per-machine Claude Code overrides. .claude/commands/ IS tracked —
-# those are the shared workflow, and a spoke cannot read a file that
-# only exists on the hub's disk.
-.claude/settings.local.json
+# Claude Code's working directory, ALL of it. This repo is public, and
+# nothing under .claude/ is of any use to someone who clones it: it is
+# this machine's agent setup — IDEA Base project/task ids, the hub-and-
+# spoke tab topology, which models we pay for and why, bypassPermissions
+# as a house default, and symlink paths into ~/.claude/projects. None of
+# that describes ConsoleForge the product.
+#
+# .claude/commands/start.md used to be tracked on the reasoning that "a
+# spoke cannot read a file that only exists on the hub's disk". True, and
+# it does not follow: a spoke is launched by consoleforge-tab on THIS
+# machine, so user scope (~/.claude/commands/) reaches it just as well
+# without publishing our operations to every cloner. Ignore the whole
+# directory rather than naming files, so the next command added here does
+# not leak the same way.
+.claude/
