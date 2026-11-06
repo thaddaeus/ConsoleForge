@@ -405,6 +405,19 @@ struct LayoutCommands: Commands {
             }
             .disabled(store.activeTabID == nil || !chrome.isAvailable)
 
+            // GitHub #48: with no second Chrome bundle, agent browsers run from the user's
+            // own `com.google.Chrome` and a Dock launch of Chrome lands on one of them —
+            // menu bar, no window, and a Force Quit that kills an agent browser instead.
+            // Say so rather than letting it be discovered the way it was the first time.
+            if chrome.isAvailable && chrome.usesDesktopChromeBundle {
+                Divider()
+                Button(chrome.isInstallingChromeForTesting
+                       ? "Downloading Chrome for Testing…"
+                       : "Agent browsers share your Chrome — quit it and a Dock click "
+                         + "opens nothing") {}
+                    .disabled(true)
+            }
+
             Button(layout.isOpen(.webConsole) ? "Hide Web Output" : "Show Web Output") {
                 layout.toggle(.webConsole)
             }

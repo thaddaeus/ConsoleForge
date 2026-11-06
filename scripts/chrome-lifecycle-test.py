@@ -95,6 +95,20 @@ def is_headless(pid):
     return "--headless" in sh("ps", "-p", str(pid), "-o", "command=")
 
 
+def runs_outside_desktop_chrome(pid):
+    """Is this browser a DIFFERENT app bundle from the user's own Chrome?
+
+    GitHub #48: LaunchServices tracks running apps by bundle, so a headless
+    com.google.Chrome is registered as a running instance of the user's desktop Chrome.
+    With their Chrome quit, a Dock click activates OURS, which can never draw a window —
+    menu bar, no window, and a Force Quit that kills an agent browser instead. A unit
+    test covers the resolution rules; only the live path can say which binary actually
+    launched, which is where it went wrong in the first place.
+    """
+    command = sh("ps", "-p", str(pid), "-o", "command=")
+    return "/Applications/Google Chrome.app/" not in command
+
+
 def has_window(pid):
     """Does this process own an on-screen window? The whole promise of the headless mode
     is that the answer is NO, so it is checked rather than assumed."""
@@ -189,6 +203,10 @@ def test_launch_and_close_tab():
     check("agent browser running against its own profile", pid is not None, f"pid={pid}")
     if pid:
         check("it really is headless", is_headless(pid))
+        # GitHub #48 — the bundle, not the window. See runs_outside_desktop_chrome.
+        check("not running from the user's own Chrome bundle",
+              runs_outside_desktop_chrome(pid),
+              sh("ps", "-p", str(pid), "-o", "command=").split(" --")[0].strip())
         # The entire point of the mode: no window means nothing can steal focus while
         # you are typing. Asserted, not assumed.
         check("it owns NO on-screen window", not has_window(pid))

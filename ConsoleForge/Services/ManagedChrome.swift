@@ -71,8 +71,6 @@ final class ManagedChrome {
 
     // MARK: - Where things live
 
-    /// Chrome, if it is installed. Canary and Chromium are accepted so a machine without
-    /// stable Chrome is not silently dead — the menu item disables itself instead.
     /// Every browser we launch carries this, and so must every browser launched on our
     /// behalf — see `writeSessionMCPConfig` and `scripts/consoleforge-chrome-mcp`. It is a
     /// single constant because the failure mode of it being applied on only SOME paths is
@@ -85,16 +83,165 @@ final class ManagedChrome {
         "--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessChecksWebSockets," +
         "LocalNetworkAccessChecksWebTransport,LocalNetworkAccessChecksWebRTC"
 
-    static let binary: String? = {
-        let candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    // MARK: - Which BUNDLE an agent browser runs from (GitHub #48)
+
+    /// WHICH BUNDLE is a correctness question, not a preference.
+    ///
+    /// macOS LaunchServices tracks running applications by BUNDLE, so a headless
+    /// `com.google.Chrome` is registered as a running instance of the user's own desktop
+    /// Chrome (`lsappinfo` reports it as `"Google Chrome"`, `BackgroundOnly`). When their
+    /// Chrome is fully quit, a Dock / Spotlight / `open` launch does not start a new
+    /// process — LaunchServices ACTIVATES an instance that is already running, which here
+    /// is one of ours. It becomes frontmost and can never draw a window, so there is
+    /// nothing to see and nothing the Window menu can bring up.
+    ///
+    /// INCIDENT 2026-10-20 (GitHub #48): three tabs' agent browsers were the only Chromes
+    /// running. Tadd got Chrome's menu bar with no window and used Force Quit three times;
+    /// each one killed the agent browser that was frontmost, not Chrome, so recovering
+    /// cost three sessions their browsers. The real Chrome started normally only once none
+    /// of ours were left.
+    ///
+    /// So an agent browser must come from a bundle whose id is NOT `com.google.Chrome`.
+    /// Chrome for Testing (`com.google.chrome.for.testing`) is the right one: a separate
+    /// bundle that keeps the real `--headless=new` rendering path, unlike
+    /// `chrome-headless-shell`, which is the old headless implementation and is not an app
+    /// bundle at all. Canary and Chromium carry their own ids and are safe for the same
+    /// reason. The user's own Chrome is kept as a LAST resort — a machine with nothing else
+    /// must still be able to browse — and flagged, because that configuration is the bug.
+    struct AgentBrowser: Equatable, Sendable {
+        var path: String
+        /// False only for the user's own `/Applications/Google Chrome.app`.
+        var isolatedFromDesktopChrome: Bool
+    }
+
+    static let desktopChromeBinary =
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+
+    /// Version directory names as puppeteer's cache writes them (`mac_arm-145.0.7632.46`),
+    /// NEWEST FIRST, with anything unparseable dropped.
+    ///
+    /// Sorted on the numeric components: lexically `mac_arm-99…` sorts after
+    /// `mac_arm-145…`, which would pin a machine to whatever old build happened to be
+    /// cached. The cache also holds `chrome-headless-shell` and the odd `.DS_Store`.
+    static func orderedPuppeteerVersions(_ names: [String]) -> [String] {
+        names.compactMap { name -> ([Int], String)? in
+            guard let dash = name.lastIndex(of: "-") else { return nil }
+            let fields = name[name.index(after: dash)...].split(separator: ".")
+            let numbers = fields.compactMap { Int($0) }
+            guard !numbers.isEmpty, numbers.count == fields.count else { return nil }
+            return (numbers, name)
+        }
+        .sorted { lhs, rhs in
+            for (a, b) in zip(lhs.0, rhs.0) where a != b { return a > b }
+            return lhs.0.count > rhs.0.count
+        }
+        .map(\.1)
+    }
+
+    /// The agent browser to use, given a machine. Pure, with the filesystem passed in:
+    /// the real one cannot describe a machine with no Chrome for Testing, and that is
+    /// precisely the machine the bug comes back on.
+    static func resolveAgentBrowser(home: String,
+                                    isExecutable: (String) -> Bool,
+                                    contentsOfDirectory: (String) -> [String]) -> AgentBrowser? {
+        let app = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+        var isolated = ["/Applications/\(app)"]
+
+        // `@puppeteer/browsers` lands here, and it is the SAME cache chrome-devtools-mcp's
+        // own Puppeteer resolves from — so one download serves both the app-owned launch
+        // and the self-launch path. The arch component (`chrome-mac-arm64` / `-x64`) is
+        // read rather than guessed.
+        let cache = "\(home)/.cache/puppeteer/chrome"
+        for version in orderedPuppeteerVersions(contentsOfDirectory(cache)) {
+            for arch in contentsOfDirectory("\(cache)/\(version)") where arch.hasPrefix("chrome-mac") {
+                isolated.append("\(cache)/\(version)/\(arch)/\(app)")
+            }
+        }
+
+        isolated += [
             "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
             "/Applications/Chromium.app/Contents/MacOS/Chromium",
         ]
-        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
-    }()
+
+        if let found = isolated.first(where: isExecutable) {
+            return AgentBrowser(path: found, isolatedFromDesktopChrome: true)
+        }
+        guard isExecutable(desktopChromeBinary) else { return nil }
+        return AgentBrowser(path: desktopChromeBinary, isolatedFromDesktopChrome: false)
+    }
+
+    /// Cached because resolution touches the disk and is asked on every menu render.
+    /// `invalidateAgentBrowser()` is how a finished install is picked up.
+    private static var cachedAgentBrowser: AgentBrowser??
+
+    static var agentBrowser: AgentBrowser? {
+        if let cached = cachedAgentBrowser { return cached }
+        let fm = FileManager.default
+        let resolved = resolveAgentBrowser(
+            home: NSHomeDirectory(),
+            isExecutable: { fm.isExecutableFile(atPath: $0) },
+            contentsOfDirectory: { (try? fm.contentsOfDirectory(atPath: $0)) ?? [] })
+        cachedAgentBrowser = resolved
+        return resolved
+    }
+
+    static func invalidateAgentBrowser() { cachedAgentBrowser = nil }
+
+    /// The browser binary, if one is installed. Canary and Chromium are accepted so a
+    /// machine without stable Chrome is not silently dead — the menu item disables itself
+    /// instead.
+    static var binary: String? { agentBrowser?.path }
 
     var isAvailable: Bool { Self.binary != nil }
+
+    /// True when agent browsers are running from the user's own Chrome bundle, which is
+    /// the #48 Dock-takeover configuration. Drives the warning in the Layout menu.
+    var usesDesktopChromeBundle: Bool {
+        Self.agentBrowser?.isolatedFromDesktopChrome == false
+    }
+
+    /// Whether a Chrome for Testing download is in flight. Observable so the menu can say
+    /// so rather than leaving the warning up while the fix is already on its way.
+    private(set) var isInstallingChromeForTesting = false
+    @ObservationIgnored private var installAttempted = false
+
+    /// Fetch Chrome for Testing when the only browser on the machine is the user's own
+    /// Chrome.
+    ///
+    /// Without this the #48 fix silently does nothing on a fresh install: resolution falls
+    /// through to stable Chrome and the Dock takeover comes back. `@puppeteer/browsers` is
+    /// Google's own installer and lands in `~/.cache/puppeteer`, the same cache
+    /// chrome-devtools-mcp's Puppeteer resolves from, so one download serves both launch
+    /// paths. npx is already a hard dependency of that server, so this adds none.
+    ///
+    /// Fire and forget, once per app run: the download is ~160MB, nothing waits on it, and
+    /// the session that triggered it launches with whatever is available now. The next
+    /// launch picks up the result, which is why it ends by invalidating the cache.
+    /// `zsh -l -c` for the same reason every other tool call uses it — npx is on the login
+    /// PATH, not the app's.
+    func installChromeForTestingIfNeeded() {
+        guard !installAttempted, Self.agentBrowser?.isolatedFromDesktopChrome == false
+        else { return }
+        installAttempted = true
+        isInstallingChromeForTesting = true
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-l", "-c", "npx -y @puppeteer/browsers install chrome@stable"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { _ in
+            Task { @MainActor in
+                Self.invalidateAgentBrowser()
+                ManagedChrome.shared.isInstallingChromeForTesting = false
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            isInstallingChromeForTesting = false
+        }
+    }
 
     private static var profilesDirectory: URL {
         AppChannel.supportDirectory().appendingPathComponent("chrome-profiles")
@@ -137,6 +284,7 @@ final class ManagedChrome {
     @discardableResult
     func open(tabID: UUID, mode: Mode = .headless, url: String = "about:blank") -> Instance? {
         guard let binary = Self.binary else { return nil }
+        installChromeForTestingIfNeeded()
         let key = Key(tabID: tabID, mode: mode)
         let target = Self.normalize(url)
 
@@ -269,16 +417,29 @@ final class ManagedChrome {
     /// Returns the config path for `claude --mcp-config`, or nil if Chrome is not
     /// installed — in which case the session launches exactly as it always did.
     func writeSessionMCPConfig(tabID: UUID, appOwned: Bool) -> String? {
-        guard Self.binary != nil else { return nil }
+        guard let binary = Self.binary else { return nil }
+        installChromeForTestingIfNeeded()
+
+        // WHICH BUNDLE the server launches is ours to decide, not Puppeteer's (GitHub
+        // #48). Left to itself the server resolves stable Chrome — the user's own bundle
+        // — and that self-launch path is the one the Dock takeover was actually observed
+        // on. `--executablePath` is how the decision in `resolveAgentBrowser` reaches it.
+        //
+        // Passed on the WRAPPER path too, as a passthrough argument rather than a second
+        // resolution: the wrapper's own fallback self-launches a browser, and duplicating
+        // the candidate order in python is exactly the silent divergence the LNA flag
+        // comment above warns about. The server ignores it when it connects by
+        // `--browserUrl`, the same as `--chromeArg`.
+        let executable = ["--executablePath", binary]
         let server: [String: Any]
         if appOwned, let wrapper = Self.wrapperPath {
-            server = ["type": "stdio", "command": wrapper, "args": [String]()]
+            server = ["type": "stdio", "command": wrapper, "args": executable]
         } else {
             server = [
                 "type": "stdio",
                 "command": "npx",
                 "args": ["-y", "chrome-devtools-mcp@latest",
-                         "--headless",
+                         "--headless"] + executable + [
                          // The server launches Chrome itself here, so our own flags never
                          // run — --chromeArg is the only way they reach that browser.
                          // Must be ONE `=`-joined token: a space-separated value that
