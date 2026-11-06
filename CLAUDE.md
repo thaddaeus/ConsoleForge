@@ -334,6 +334,29 @@ closes (its height may legitimately change — a lone row fills). Beta only; pro
 writes no trace. Re-run it for any change that touches layout or terminal sizing. It does
 NOT cover sleep/wake or display connect/disconnect — do those by hand.
 
+**`isUsable` is a floor, not a filter — a size can be plausible and still be a lie.**
+A miniaturized window keeps posting `frameDidChange`, and those bounds describe AppKit
+tearing the surface down for the Dock tile, not the terminal area. They are small but
+comfortably above the 20 × 4 reflow floor, so they were applied, and SwiftTerm reflowed
+the buffer to a width nothing had been written at — minimize/restore garble that no
+repaint on restore can undo, because it is MODEL corruption. Only the next real window
+resize rewrote it, which is exactly the workaround Tadd was performing by hand. So the
+manager has a STATE, `isMiniaturized`: while it is set, `setSize` and `resync` drop
+geometry outright and any in-flight debounce is cancelled, and restore re-asserts the
+true bounds through `resync` once they settle. The general rule: when an event makes the
+reported geometry meaningless, SUSPEND the path — don't widen the floor until the bad
+size fails it, which would also reject sizes a user legitimately asked for.
+
+**"Settled" is measured, never timed.** The wake/display-change recovery used to resync
+on a single shot 0.5s after the notification, an interval nothing promises: a wake with a
+display change behind it hands out bounds for well over a second, so the shot read a
+mid-flight size, resynced to THAT, and left the grid wrong — which is why sleep still
+didn't settle right after the first resync landed. `Coordinator.scheduleResyncWhenSettled`
+instead samples the container's bounds every 150 ms and resyncs on two consecutive
+identical readings (cap 3s). Sleep recovery also needs BOTH notifications:
+`didWakeNotification` is system wake only, so a display that slept on its own, or a
+locked screen, had no recovery at all until `screensDidWakeNotification` was added.
+
 There are exactly TWO writers of a terminal view's frame — `TerminalSession.resize`
 (reached only from the manager) and the mount in `TerminalHostView.updateNSView`. Both
 are gated on `TerminalMetrics.isUsable`. Adding a third, or ungating either, is how the
